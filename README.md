@@ -32,7 +32,7 @@ On the VM:
 sudo nano /root/setup-log4shell-lab.sh
 ```
 
-Paste **everything below** into the file:
+Paste into the file:
 
 ```bash
 #!/usr/bin/env bash
@@ -278,15 +278,13 @@ sudo chmod +x /root/setup-log4shell-lab.sh
 
 ---
 
-### 2. Run the new, up-to-date script
-
-On a fresh (or cleaned) VM:
+### 2. Run on a fresh VM:
 
 ```bash
 sudo /root/setup-log4shell-lab.sh
 ```
 
-When it finishes, as it prints:
+When it finishes, it prints:
 
 ```bash
 sudo su - log4shell
@@ -463,7 +461,7 @@ chmod +x /opt/log4shell/*.sh
 ls -l /opt/log4shell
 ```
 
-You should now see:
+You now see:
 
 * `run-http-server.sh`
 * `run-ldap-server.sh`
@@ -708,9 +706,7 @@ pkill -f "marshalsec.jndi.LDAPRefServer" || true
 ---
 
 
-Moment to “flip the switch” and show **before/after** behaviour with a proper Log4j patch.
-
-Below is a *drop-in runbook* you can follow on your current VM to:
+Moment to “flip the switch” and show before/after behaviour with a proper Log4j patch:
 
 1. Upgrade Log4j in `log4shell-vulnerable-app`
 2. Rebuild & restart the app
@@ -720,7 +716,7 @@ Below is a *drop-in runbook* you can follow on your current VM to:
 
 ## 1. Patch Log4j in the Gradle build
 
-You already have the app checked out at:
+Already have the app checked out at:
 
 ```bash
 /opt/log4shell/log4shell-vulnerable-app
@@ -780,13 +776,13 @@ jar tf build/libs/log4shell-vulnerable-app-0.0.1-SNAPSHOT.jar \
   | grep 'log4j-core'
 ```
 
-You want to see something like:
+You see something like:
 
 ```text
 BOOT-INF/lib/log4j-core-2.17.1.jar
 ```
 
-That’s your **evidence screenshot** for “patched Log4j version”.
+That’s **evidence screenshot** for “patched Log4j version”.
 
 ---
 
@@ -818,7 +814,7 @@ You should still get the “Hello, world!” response.
 
 ## 4. Re-run the **same Log4Shell payload**
 
-You already have the attacker infra:
+Already have the attacker infra:
 
 * HTTP payload server on `:8000`
 * LDAP server on `:1389`
@@ -852,7 +848,7 @@ Hello, world!
 
 ## 5. Compare logs **before vs after** patch
 
-This is the “demonstration” part for your assignment.
+This is the “demonstration” part for assignment.
 
 ### 5.1 LDAP server log (before patch: **activity**, after patch: **no new lines**)
 
@@ -915,9 +911,9 @@ This lines up with vendor guidance: **the main remediation is to upgrade Log4j t
 
 ---
 
-## 6. Describe this in your report / demo
+## 6. Describing for my report / demo
 
-Summarise the “patch & retest”:
+Summarised the “patch & retest”:
 
 1. **Initial state (vulnerable)**
 
@@ -1005,7 +1001,7 @@ cd /opt/log4shell
 ./run-vulnerable-app.sh
 ```
 
-A quick smoke test confirmed the app was up on port 8080:
+A quick test confirmed the app was up on port 8080:
 
 ```bash
 curl -s -D- http://127.0.0.1:8080/ | head
@@ -1099,5 +1095,3 @@ This demonstrates that:
 
 1. **Vulnerability reproduction**: The original configuration allowed Log4Shell-style exploitation (inbound JNDI + outbound LDAP).
 2. **Effective mitigation**: A straightforward library upgrade (forcing Log4j to 2.17.1) is sufficient to break the exploitation path completely, even though the application code and the attacker’s payload remain unchanged.
-
-Cite these logs and steps directly as your **“Demonstrate patching of Log4j and re-testing with the same payload”** evidence for Task 2.

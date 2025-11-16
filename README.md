@@ -240,5 +240,3 @@ You can summarise the “patch & retest” story like this:
    * This demonstrates that **upgrading Log4j** (rather than relying on JVM quirks or partial mitigations) effectively blocks the Log4Shell exploit path, even though the application logic and the incoming payload remain unchanged.
 
 ---
-
-If you paste a short snippet from your *after-patch* logs (LDAP + app log), I can help you turn it into a very clean 1–2 paragraph “Results of patching” section for Task 2 / Task 3.
